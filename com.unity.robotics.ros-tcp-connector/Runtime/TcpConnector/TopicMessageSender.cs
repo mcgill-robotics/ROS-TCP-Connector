@@ -19,12 +19,6 @@ namespace Unity.Robotics.ROSTCPConnector
         //Messages waiting to be sent queue.
         LinkedList<Message> m_OutgoingMessages = new LinkedList<Message>();
 
-        //Keeps track of how many outgoing messages were removed due to queue overflow.
-        //If a message is published but the queue is full, the counter is incremented, the
-        //first message in the queue is recycled and the message to publish is put on the end of the queue.
-        //If this is non 0, a SendTo call will decrement the counter instead of sending data.
-        int m_QueueOverflowUnsentCounter = 0;
-
         //Latching - This message will be set if latching is enabled, and on reconnection, it will be sent again.
         Message m_LastMessageSent = null;
 
@@ -32,7 +26,9 @@ namespace Unity.Robotics.ROSTCPConnector
         IMessagePool m_MessagePool;
         public bool MessagePoolEnabled => m_MessagePool != null;
 
-        public TopicMessageSender(string topicName, string rosMessageName, int queueSize)
+        int m_DroppedMessageCount = 0;
+
+        public TopicMessageSender(string topicName, string rosMessageName, int queueSize = 10)
         {
             if (queueSize < 1)
             {
@@ -50,12 +46,15 @@ namespace Unity.Robotics.ROSTCPConnector
             {
                 if (m_OutgoingMessages.Count >= QueueSize)
                 {
-                    //Remove outgoing messages that don't fit in the queue.
-                    //Recycle the message if applicable
                     TryRecycleMessage(m_OutgoingMessages.First.Value);
-                    //Update the overflow counter.
-                    m_QueueOverflowUnsentCounter++;
                     m_OutgoingMessages.RemoveFirst();
+                    
+                    m_DroppedMessageCount++;
+                    if (m_DroppedMessageCount % 30 == 1) // Log every 30 drops to avoid spam
+                    {
+                        UnityEngine.Debug.LogWarning($"[ROS-TCP-Connector] Dropped {m_DroppedMessageCount} messages on topic '{TopicName}'! " +
+                                                     $"The ROS 2 endpoint cannot keep up with the publish rate.");
+                    }
                 }
 
                 //Add a new valid message to the end.
@@ -65,21 +64,12 @@ namespace Unity.Robotics.ROSTCPConnector
 
         SendToState GetMessageToSend(out Message messageToSend)
         {
-            SendToState result = SendToState.NoMessageToSendError;
+            SendToState result = SendToState.Ignore;
             messageToSend = null;
             lock (m_OutgoingMessages)
             {
-                if (m_QueueOverflowUnsentCounter > 0)
+                if (m_OutgoingMessages.Count > 0)
                 {
-                    //This means that we can't send message to ROS as fast as we're generating them.
-                    //This could potentially be bad as it means that we are dropping messages!
-                    m_QueueOverflowUnsentCounter--;
-                    messageToSend = null;
-                    result = SendToState.QueueFullWarning;
-                }
-                else if (m_OutgoingMessages.Count > 0)
-                {
-                    //Retrieve the next message and populate messageToSend.
                     messageToSend = m_OutgoingMessages.First.Value;
                     m_OutgoingMessages.RemoveFirst();
                     result = SendToState.Normal;
@@ -153,7 +143,6 @@ namespace Unity.Robotics.ROSTCPConnector
             {
                 toRecycle = new List<Message>(m_OutgoingMessages);
                 m_OutgoingMessages.Clear();
-                m_QueueOverflowUnsentCounter = 0;
             }
 
             foreach (Message messageToRecycle in toRecycle)

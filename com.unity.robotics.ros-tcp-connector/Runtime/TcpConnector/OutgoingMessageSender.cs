@@ -11,7 +11,8 @@ namespace Unity.Robotics.ROSTCPConnector
         {
             Normal,
             NoMessageToSendError,
-            QueueFullWarning
+            QueueFullWarning,
+            Ignore
         }
 
         public abstract SendToState SendInternal(MessageSerializer m_MessageSerializer, System.IO.Stream stream);

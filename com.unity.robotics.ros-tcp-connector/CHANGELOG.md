@@ -15,12 +15,19 @@ The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/) a
 
 ### Changed
 
+- **Performance**: Disabled Nagle's algorithm (`TCP_NODELAY = true`) for lower latency.
+- **Performance**: Removed artificial `Task.Delay` in asynchronous read loops.
+- **Performance**: Flattened `SendTo` syscalls into a single `stream.Write()` for higher throughput.
+- **Performance**: Implemented `ArrayPool<byte>` renting for incoming message arrays to reduce GC pressure.
+
 ### Deprecated
 
 ### Removed
 
 ### Fixed
 
+- **Performance/Bug**: Fixed a throughput issue in `TopicMessageSender` where a full queue would cause the network thread to skip sending the next available message.
+- **Concurrency**: Fixed thread safety of `MessageSerializer` in `SendServiceMessage` and `QueueSysCommand`.
 
 ## [0.7.0-preview] - 2022-02-01
 

@@ -89,10 +89,24 @@ namespace Unity.Robotics.ROSTCPConnector.MessageGeneration
             return result;
         }
 
+        private byte[] m_SendBuffer = new byte[65536]; // Start with 64KB, grow as needed
+
         public void SendTo(System.IO.Stream stream)
         {
+            if (m_SendBuffer.Length < Length)
+            {
+                m_SendBuffer = new byte[Math.Max(m_SendBuffer.Length * 2, Length)];
+            }
+
+            int writeIndex = 0;
             foreach (byte[] statement in m_ListOfSerializations)
-                stream.Write(statement, 0, statement.Length);
+            {
+                if (statement == null)
+                    continue;
+                statement.CopyTo(m_SendBuffer, writeIndex);
+                writeIndex += statement.Length;
+            }
+            stream.Write(m_SendBuffer, 0, Length);
         }
 
         // Alignment, offset, padding

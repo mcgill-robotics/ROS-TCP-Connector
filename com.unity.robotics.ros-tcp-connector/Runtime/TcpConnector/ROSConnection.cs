@@ -10,6 +10,7 @@ using UnityEngine.Serialization;
 using System.Collections.Concurrent;
 using System.Threading;
 using System.Linq;
+using System.Buffers;
 
 namespace Unity.Robotics.ROSTCPConnector
 {
@@ -297,9 +298,9 @@ namespace Unity.Robotics.ROSTCPConnector
         // Send a request to a ros service
         public async Task<RESPONSE> SendServiceMessage<RESPONSE>(string rosServiceName, Message serviceRequest) where RESPONSE : Message, new()
         {
-            m_MessageSerializer.Clear();
-            m_MessageSerializer.SerializeMessage(serviceRequest);
-            byte[] requestBytes = m_MessageSerializer.GetBytes();
+            var serviceSerializer = new MessageSerializer();
+            serviceSerializer.SerializeMessage(serviceRequest);
+            byte[] requestBytes = serviceSerializer.GetBytes();
             TaskPauser pauser = new TaskPauser();
 
             int srvID;
@@ -787,6 +788,7 @@ namespace Unity.Robotics.ROSTCPConnector
                     ROSConnection.m_HasConnectionError = true; // until we actually see a reply back, assume there's a problem
 
                     client = new TcpClient();
+                    client.NoDelay = true;
                     client.Connect(rosIPAddress, rosPort);
 
                     NetworkStream networkStream = client.GetStream();
@@ -827,6 +829,9 @@ namespace Unity.Robotics.ROSTCPConnector
                                 case OutgoingMessageSender.SendToState.Normal:
                                     //This is normal operation.
                                     break;
+                                case OutgoingMessageSender.SendToState.Ignore:
+                                    //The queue was empty due to dropped messages. Ignore silently.
+                                    break;
                                 case OutgoingMessageSender.SendToState.QueueFullWarning:
                                     //Unable to send messages to ROS as fast as we're generating them.
                                     //This could be caused by a TCP connection that is too slow.
@@ -848,11 +853,13 @@ namespace Unity.Robotics.ROSTCPConnector
                 catch (OperationCanceledException)
                 {
                 }
-                catch (Exception e)
+                catch (System.Exception e)
                 {
                     ROSConnection.m_HasConnectionError = true;
-                    Debug.Log($"Connection to {rosIPAddress}:{rosPort} failed - " + e);
-                    await Task.Delay(nextReconnectionDelay);
+                    UnityEngine.Debug.LogWarning("Connection to " + rosIPAddress + ":" + rosPort + " failed or dropped - " + e.Message);
+                    DeregisterAll();
+                    ClearMessageQueue(outgoingQueue);
+                    await System.Threading.Tasks.Task.Delay(nextReconnectionDelay);
                 }
                 finally
                 {
@@ -910,9 +917,6 @@ namespace Unity.Robotics.ROSTCPConnector
             int read = 0;
             while (read < length && networkStream.CanRead)
             {
-                while (!token.IsCancellationRequested && !networkStream.DataAvailable)
-                    await Task.Delay(sleepMilliseconds);
-
                 token.ThrowIfCancellationRequested();
                 read += await networkStream.ReadAsync(array, read, length - read, token);
             }
@@ -941,7 +945,7 @@ namespace Unity.Robotics.ROSTCPConnector
             await ReadToByteArray(networkStream, s_FourBytes, 4, sleepMilliseconds, token);
             int full_message_size = BitConverter.ToInt32(s_FourBytes, 0);
 
-            byte[] readBuffer = new byte[full_message_size];
+            byte[] readBuffer = ArrayPool<byte>.Shared.Rent(full_message_size);
             await ReadToByteArray(networkStream, readBuffer, full_message_size, sleepMilliseconds, token);
 
             return Tuple.Create(topicName, readBuffer);
