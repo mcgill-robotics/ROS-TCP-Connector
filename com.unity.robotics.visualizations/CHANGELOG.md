@@ -21,6 +21,7 @@ The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/) a
 
 ### Fixed
 
+- OccupancyGridDefaultVisualizer uses `Texture2D.Reinitialize` instead of the deprecated `Resize` (McGill Robotics fork, Unity 6).
 
 ## [0.7.0-preview] - 2022-02-01
 

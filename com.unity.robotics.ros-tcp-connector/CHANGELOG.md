@@ -7,27 +7,44 @@ The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/) a
 
 ## Unreleased
 
+Changes in the McGill Robotics fork. See the top of README.md for the reasons.
+
 ### Upgrade Notes
+
+Use together with the endpoint fork (kaidalisohaib/ROS-TCP-Endpoint, branch `main-ros2-optimized`) to get dead connection detection in both directions. Either side still works with the upstream version of the other.
 
 ### Known Issues
 
+- `SendServiceMessage` still has no timeout. A call whose request or response is lost in a disconnect never completes.
+
 ### Added
+
+- Reconnect if no handshake arrives within 10 s of connecting, or, once the endpoint has shown that it sends keepalives, if nothing arrives from it for 10 s.
+- `OnDestroy()` calls `Disconnect()`.
 
 ### Changed
 
-- **Performance**: Disabled Nagle's algorithm (`TCP_NODELAY = true`) for lower latency.
-- **Performance**: Removed artificial `Task.Delay` in asynchronous read loops.
-- **Performance**: Flattened `SendTo` syscalls into a single `stream.Write()` for higher throughput.
-- **Performance**: Implemented `ArrayPool<byte>` renting for incoming message arrays to reduce GC pressure.
-
-### Deprecated
+- Set `TCP_NODELAY` on the socket.
+- `MessageSerializer.SendTo` writes a message with one `Write()` call from a reusable buffer. The buffer is allocated on first use. Sys commands still use several writes.
+- The reader awaits `ReadAsync` directly instead of polling `DataAvailable` with `Task.Delay`.
+- `SendServiceMessage` uses its own `MessageSerializer`.
+- `TopicMessageSender`: an overflowing queue drops the oldest message and logs a warning naming the topic every 30 drops, instead of a generic "Queue full!" warning from the network thread on every drop.
+- Keepalives are timed with a `Stopwatch`, so they keep going while the editor is paused or the main thread is busy.
+- Connecting times out after 5 s and writes time out after 10 s.
+- The "connection failed" warning is logged once per outage instead of on every retry.
 
 ### Removed
 
+- The summer change that rented incoming buffers from `ArrayPool<byte>`. See Fixed.
+
 ### Fixed
 
-- **Performance/Bug**: Fixed a throughput issue in `TopicMessageSender` where a full queue would cause the network thread to skip sending the next available message.
-- **Concurrency**: Fixed thread safety of `MessageSerializer` in `SendServiceMessage` and `QueueSysCommand`.
+- Incoming buffers rented from `ArrayPool` could be longer than the message, and sys command JSON was decoded from the whole array. They were also never returned to the pool. Buffers are exact size again.
+- A 0-byte read (endpoint closed the connection) made the read loop spin at 100% CPU. It now ends the connection and Unity reconnects.
+- The reader task logged and retried forever after a read error. It now stops, and the connection thread reconnects.
+- `Disconnect()` closes the socket immediately, which unblocks a pending read, write or connect. Mono's `ReadAsync` does not abort on cancellation.
+- `Connect()` while connected started a second connection thread sharing the same queue.
+- Publisher re-registration on reconnect was queued behind that topic's messages (rejected by the endpoint as not registered) and used the main thread's serializer from the connection thread. It is now written straight to the new stream.
 
 ## [0.7.0-preview] - 2022-02-01
 
