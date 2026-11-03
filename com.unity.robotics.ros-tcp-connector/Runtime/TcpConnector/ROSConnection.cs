@@ -10,6 +10,7 @@ using UnityEngine.Serialization;
 using System.Collections.Concurrent;
 using System.Threading;
 using System.Linq;
+using Stopwatch = System.Diagnostics.Stopwatch;
 
 namespace Unity.Robotics.ROSTCPConnector
 {
@@ -760,6 +761,42 @@ namespace Unity.Robotics.ROSTCPConnector
             }
         }
 
+        // How long a connection may go without progress before we drop it and reconnect.
+        // Used for blocking writes, and for silence from an endpoint that sends keepalives.
+        // Matches the endpoint's default TCP_CLIENT_TIMEOUT.
+        const float k_DeadConnectionTimeoutSeconds = 10.0f;
+        const float k_ConnectTimeoutSeconds = 5.0f;
+
+        // Shared between the reader task and the connection thread of one connection.
+        class ConnectionHealth
+        {
+            // Stopwatch.GetTimestamp() of the last message read from the endpoint (or of the connect).
+            long m_LastReceiveTimestamp = Stopwatch.GetTimestamp();
+            volatile bool m_ReceivedAnything;
+            // The fork's endpoint sends an empty keepalive message every second when idle.
+            // Upstream endpoints never do, so after the handshake the silence check is only
+            // enabled once one has been seen.
+            volatile bool m_EndpointSendsKeepalives;
+
+            public void OnMessageRead(bool isKeepalive)
+            {
+                Interlocked.Exchange(ref m_LastReceiveTimestamp, Stopwatch.GetTimestamp());
+                m_ReceivedAnything = true;
+                if (isKeepalive)
+                    m_EndpointSendsKeepalives = true;
+            }
+
+            public bool EndpointWentSilent(float timeoutSeconds)
+            {
+                // Every endpoint sends its handshake as soon as it accepts, so no handshake
+                // within the timeout means the endpoint is stuck, whatever its version.
+                if (m_ReceivedAnything && !m_EndpointSendsKeepalives)
+                    return false;
+                long elapsed = Stopwatch.GetTimestamp() - Interlocked.Read(ref m_LastReceiveTimestamp);
+                return elapsed > (long)(timeoutSeconds * Stopwatch.Frequency);
+            }
+        }
+
         static async Task ConnectionThread(
             string rosIPAddress,
             int rosPort,
@@ -776,11 +813,14 @@ namespace Unity.Robotics.ROSTCPConnector
             int nextReaderIdx = 101;
             int nextReconnectionDelay = 1000;
             MessageSerializer messageSerializer = new MessageSerializer();
+            // Only warn once per outage instead of every reconnection attempt.
+            bool loggedConnectionFailure = false;
 
             while (!token.IsCancellationRequested)
             {
                 TcpClient client = null;
                 CancellationTokenSource readerCancellation = null;
+                CancellationTokenRegistration closeOnCancel = default;
 
                 try
                 {
@@ -788,24 +828,59 @@ namespace Unity.Robotics.ROSTCPConnector
 
                     client = new TcpClient();
                     client.NoDelay = true;
-                    client.Connect(rosIPAddress, rosPort);
+
+                    // Disconnect() cancels the token from the main thread. Closing the socket is
+                    // the only reliable way to wake this thread and the reader if they are blocked
+                    // in Connect, Write or ReadAsync (Mono's ReadAsync ignores the token once the
+                    // read is pending).
+                    TcpClient clientToClose = client;
+                    closeOnCancel = token.Register(() => clientToClose.Close());
+
+                    // Connect with a timeout. A plain Connect() to a host that is down can block
+                    // for minutes (SYN retries), during which we can't notice the host coming back.
+                    Task connectTask = client.ConnectAsync(rosIPAddress, rosPort);
+                    if (await Task.WhenAny(connectTask, Task.Delay((int)(k_ConnectTimeoutSeconds * 1000), token)) != connectTask)
+                    {
+                        // observe the exception the abandoned connect will throw when the client is closed
+                        _ = connectTask.ContinueWith(t => t.Exception, TaskContinuationOptions.OnlyOnFaulted);
+                        token.ThrowIfCancellationRequested();
+                        throw new TimeoutException($"no answer after {k_ConnectTimeoutSeconds} s");
+                    }
+                    await connectTask; // rethrows connection refused etc.
 
                     NetworkStream networkStream = client.GetStream();
                     networkStream.ReadTimeout = (int)(networkTimeoutSeconds * 1000);
+                    // Without this, Write() blocks forever once the send buffer fills up on a
+                    // half-open connection, and the connection thread never reconnects.
+                    networkStream.WriteTimeout = (int)(k_DeadConnectionTimeoutSeconds * 1000);
 
                     SendKeepalive(networkStream);
                     OnConnectionStartedCallback(networkStream);
 
+                    ConnectionHealth health = new ConnectionHealth();
                     readerCancellation = new CancellationTokenSource();
-                    _ = Task.Run(() => ReaderThread(nextReaderIdx, networkStream, incomingQueue, sleepMilliseconds, readerCancellation.Token));
+                    int readerIdx = nextReaderIdx;
+                    Task readerTask = Task.Run(() => ReaderThread(readerIdx, networkStream, incomingQueue, sleepMilliseconds, health, readerCancellation.Token));
                     nextReaderIdx++;
 
+                    // Wall clock for keepalives. s_RealTimeSinceStartup is only updated in Update(),
+                    // so it stops while the editor is paused or the main thread is busy, and we
+                    // stopped sending keepalives exactly when the endpoint needed them.
+                    Stopwatch sinceLastSend = Stopwatch.StartNew();
+
                     // connected, now just watch our queue for outgoing messages to send (or else send a keepalive message occasionally)
-                    float waitingSinceRealTime = s_RealTimeSinceStartup;
                     while (true)
                     {
                         bool messageReadyEventWasSet = outgoingQueue.NewMessageReadyToSendEvent.WaitOne(sleepMilliseconds);
                         token.ThrowIfCancellationRequested();
+
+                        // The reader stops on any read error, including the endpoint closing the
+                        // connection. Reconnect instead of writing into a dead socket.
+                        if (readerTask.IsCompleted)
+                            throw new System.IO.IOException("connection closed by the ROS endpoint");
+
+                        if (health.EndpointWentSilent(k_DeadConnectionTimeoutSeconds))
+                            throw new TimeoutException($"nothing received from the ROS endpoint for {k_DeadConnectionTimeoutSeconds} s");
 
                         if (messageReadyEventWasSet)
                         {
@@ -813,10 +888,10 @@ namespace Unity.Robotics.ROSTCPConnector
                         }
                         else
                         {
-                            if (s_RealTimeSinceStartup > waitingSinceRealTime + keepaliveTime)
+                            if (sinceLastSend.Elapsed.TotalSeconds > keepaliveTime)
                             {
                                 SendKeepalive(networkStream);
-                                waitingSinceRealTime = s_RealTimeSinceStartup;
+                                sinceLastSend.Restart();
                             }
                         }
 
@@ -845,8 +920,11 @@ namespace Unity.Robotics.ROSTCPConnector
                             }
 
                             token.ThrowIfCancellationRequested();
-                            waitingSinceRealTime = s_RealTimeSinceStartup;
+                            sinceLastSend.Restart();
                         }
+
+                        if (!ROSConnection.m_HasConnectionError)
+                            loggedConnectionFailure = false; // got the handshake, so the next failure is a new outage
                     }
                 }
                 catch (OperationCanceledException)
@@ -855,69 +933,103 @@ namespace Unity.Robotics.ROSTCPConnector
                 catch (System.Exception e)
                 {
                     ROSConnection.m_HasConnectionError = true;
-                    UnityEngine.Debug.LogWarning("Connection to " + rosIPAddress + ":" + rosPort + " failed or dropped - " + e.Message);
-                    DeregisterAll();
-                    ClearMessageQueue(outgoingQueue);
-                    await System.Threading.Tasks.Task.Delay(nextReconnectionDelay);
+                    // Exceptions caused by Disconnect() closing the socket are not failures.
+                    if (!token.IsCancellationRequested && !loggedConnectionFailure)
+                    {
+                        UnityEngine.Debug.LogWarning("Connection to " + rosIPAddress + ":" + rosPort + " failed or dropped, retrying every " +
+                            (nextReconnectionDelay / 1000.0f) + " s - " + e.Message);
+                        loggedConnectionFailure = true;
+                    }
                 }
                 finally
                 {
+                    closeOnCancel.Dispose();
+
                     if (readerCancellation != null)
                         readerCancellation.Cancel();
 
+                    // Closing the client also makes a pending ReadAsync in the reader throw, so the
+                    // reader task always ends here.
                     if (client != null)
                         client.Close();
 
                     // clear the message queue
                     ClearMessageQueue(outgoingQueue);
+                    // Must run after ClearMessageQueue: it marks subscribers as unregistered, so
+                    // OnConnectionStartedCallback re-sends registrations that were just cleared.
                     DeregisterAll();
                 }
-                await Task.Yield();
-            }
-        }
 
-        static async Task ReaderThread(int readerIdx, NetworkStream networkStream, ConcurrentQueue<Tuple<string, byte[]>> queue, int sleepMilliseconds, CancellationToken token)
-        {
-            // First message should be the handshake
-            Tuple<string, byte[]> handshakeContent = await ReadMessageContents(networkStream, sleepMilliseconds, token);
-            if (handshakeContent.Item1 == SysCommand.k_SysCommand_Handshake)
-            {
-                ROSConnection.m_HasConnectionError = false;
-                queue.Enqueue(handshakeContent);
-            }
-            else
-            {
-                Debug.LogError($"Invalid ROS-TCP-Endpoint version detected: 0.6.0 or older. Expected: {k_Version}.");
-            }
-
-            while (!token.IsCancellationRequested)
-            {
                 try
                 {
-                    Tuple<string, byte[]> content = await ReadMessageContents(networkStream, sleepMilliseconds, token);
-                    ROSConnection.m_HasConnectionError = false;
-
-                    if (content.Item1 != "") // ignore keepalive messages
-                        queue.Enqueue(content);
+                    if (!token.IsCancellationRequested)
+                        await Task.Delay(nextReconnectionDelay, token);
                 }
                 catch (OperationCanceledException)
                 {
                 }
-                catch (Exception e)
+            }
+        }
+
+        static async Task ReaderThread(int readerIdx, NetworkStream networkStream, ConcurrentQueue<Tuple<string, byte[]>> queue, int sleepMilliseconds, ConnectionHealth health, CancellationToken token)
+        {
+            // Any read error ends this task, and the connection thread reconnects when it sees that.
+            // (It used to log and retry forever, which spun on a closed socket.)
+            try
+            {
+                // First message should be the handshake
+                Tuple<string, byte[]> handshakeContent = await ReadMessageContents(networkStream, sleepMilliseconds, token);
+                health.OnMessageRead(false);
+                if (handshakeContent.Item1 == SysCommand.k_SysCommand_Handshake)
+                {
+                    ROSConnection.m_HasConnectionError = false;
+                    queue.Enqueue(handshakeContent);
+                }
+                else
+                {
+                    Debug.LogError($"Invalid ROS-TCP-Endpoint version detected: 0.6.0 or older. Expected: {k_Version}.");
+                }
+
+                while (!token.IsCancellationRequested)
+                {
+                    Tuple<string, byte[]> content = await ReadMessageContents(networkStream, sleepMilliseconds, token);
+                    ROSConnection.m_HasConnectionError = false;
+                    bool isKeepalive = content.Item1 == "";
+                    health.OnMessageRead(isKeepalive);
+
+                    if (!isKeepalive) // ignore keepalive messages
+                        queue.Enqueue(content);
+                }
+            }
+            catch (OperationCanceledException)
+            {
+            }
+            catch (Exception e)
+            {
+                // After Disconnect() or a reconnect the socket is closed on purpose; don't report that.
+                if (!token.IsCancellationRequested)
                 {
                     ROSConnection.m_HasConnectionError = true;
-                    Debug.Log("Reader " + readerIdx + " exception! " + e);
+                    Debug.Log("Reader " + readerIdx + " stopped: " + e.Message);
                 }
             }
         }
 
         static async Task ReadToByteArray(NetworkStream networkStream, byte[] array, int length, int sleepMilliseconds, CancellationToken token)
         {
+            // No more DataAvailable polling with Task.Delay: ReadAsync waits for data by itself.
+            // Cancellation works by closing the socket (see ConnectionThread), which makes a
+            // pending ReadAsync throw.
             int read = 0;
             while (read < length && networkStream.CanRead)
             {
                 token.ThrowIfCancellationRequested();
-                read += await networkStream.ReadAsync(array, read, length - read, token);
+                int n = await networkStream.ReadAsync(array, read, length - read, token);
+                // 0 bytes means the endpoint closed the connection. Without this check the loop
+                // did read += 0 forever at 100% CPU.
+                if (n == 0)
+                    throw new System.IO.IOException("the ROS endpoint closed the connection");
+                read += n;
             }
 
             if (read < length)
