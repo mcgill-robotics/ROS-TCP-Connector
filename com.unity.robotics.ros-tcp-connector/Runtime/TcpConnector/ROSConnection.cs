@@ -421,8 +421,13 @@ namespace Unity.Robotics.ROSTCPConnector
 
             public void SendPublisherRegistration(string topic, string message_name, int queueSize, bool latch, NetworkStream stream = null)
             {
+                // Pass the stream on: without it, the re-registration done on reconnect was queued
+                // behind messages already waiting for this topic (so the endpoint rejected them as
+                // "Not registered to publish topic"), and it went through the main thread's
+                // m_MessageSerializer from the connection thread.
                 m_Self.SendSysCommand(SysCommand.k_SysCommand_Publish,
-                    new SysCommand_PublisherRegistration { topic = topic, message_name = message_name, queue_size = queueSize, latch = latch }
+                    new SysCommand_PublisherRegistration { topic = topic, message_name = message_name, queue_size = queueSize, latch = latch },
+                    stream
                 );
             }
 
