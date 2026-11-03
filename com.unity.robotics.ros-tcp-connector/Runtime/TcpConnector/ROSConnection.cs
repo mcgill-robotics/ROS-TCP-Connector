@@ -503,6 +503,12 @@ namespace Unity.Robotics.ROSTCPConnector
             if (!IPFormatIsCorrect(RosIPAddress))
                 Debug.LogWarning("Invalid ROS IP address: " + RosIPAddress);
 
+            // Calling Connect() again (e.g. Connect(ip, port) from a script) used to start a
+            // second connection thread without stopping the first. Both then shared the same
+            // outgoing queue and the endpoint saw two Unity clients.
+            if (HasConnectionThread)
+                Disconnect();
+
             m_ConnectionThreadCancellation = new CancellationTokenSource();
 
             Task.Run(() => ConnectionThread(
@@ -551,6 +557,9 @@ namespace Unity.Robotics.ROSTCPConnector
 
         public void Disconnect()
         {
+            // Cancelling also closes the TcpClient (see ConnectionThread), which unblocks any
+            // pending read or write. So the socket is closed now, before a domain reload can
+            // kill the thread and leak it, and the endpoint sees the disconnect immediately.
             m_ConnectionThreadCancellation?.Cancel();
             //The thread may be waiting on a ManualResetEvent, if so, this will wake it so it can exit immediately.
             m_OutgoingMessageQueue?.NewMessageReadyToSendEvent?.Set();
@@ -1069,6 +1078,15 @@ namespace Unity.Robotics.ROSTCPConnector
         void OnApplicationQuit()
         {
             Disconnect();
+        }
+
+        // Also covers the ROSConnection being destroyed without quitting (scene change,
+        // Destroy() from a script). The connection thread used to keep running in that case.
+        void OnDestroy()
+        {
+            Disconnect();
+            if (_instance == this)
+                _instance = null;
         }
 
         void SendSysCommand(string command, object param, NetworkStream stream = null)
