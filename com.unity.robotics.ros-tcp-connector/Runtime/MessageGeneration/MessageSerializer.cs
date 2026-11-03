@@ -89,13 +89,18 @@ namespace Unity.Robotics.ROSTCPConnector.MessageGeneration
             return result;
         }
 
-        private byte[] m_SendBuffer = new byte[65536]; // Start with 64KB, grow as needed
+        // Reused by SendTo so a message goes out in one Write() call. Allocated on first use:
+        // many serializers are created only for GetBytes() (e.g. one per service call) and
+        // should not each pay for a 64KB buffer. Not thread safe: like the rest of this class,
+        // one MessageSerializer must only be used by one thread at a time.
+        byte[] m_SendBuffer;
 
         public void SendTo(System.IO.Stream stream)
         {
-            if (m_SendBuffer.Length < Length)
+            if (m_SendBuffer == null || m_SendBuffer.Length < Length)
             {
-                m_SendBuffer = new byte[Math.Max(m_SendBuffer.Length * 2, Length)];
+                int oldLength = m_SendBuffer == null ? 0 : m_SendBuffer.Length;
+                m_SendBuffer = new byte[Math.Max(Math.Max(oldLength * 2, 65536), Length)];
             }
 
             int writeIndex = 0;

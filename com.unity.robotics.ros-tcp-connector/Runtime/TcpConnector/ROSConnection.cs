@@ -10,7 +10,6 @@ using UnityEngine.Serialization;
 using System.Collections.Concurrent;
 using System.Threading;
 using System.Linq;
-using System.Buffers;
 
 namespace Unity.Robotics.ROSTCPConnector
 {
@@ -945,7 +944,11 @@ namespace Unity.Robotics.ROSTCPConnector
             await ReadToByteArray(networkStream, s_FourBytes, 4, sleepMilliseconds, token);
             int full_message_size = BitConverter.ToInt32(s_FourBytes, 0);
 
-            byte[] readBuffer = ArrayPool<byte>.Shared.Rent(full_message_size);
+            // Exact size, not ArrayPool.Rent(): Rent can return a bigger array, and the buffer is
+            // handed to code that uses its Length (Encoding.UTF8.GetString for sys commands,
+            // user callbacks via RosTopicState). The trailing bytes would end up in the JSON.
+            // The buffer is never returned to a pool either, since it outlives this method.
+            byte[] readBuffer = new byte[full_message_size];
             await ReadToByteArray(networkStream, readBuffer, full_message_size, sleepMilliseconds, token);
 
             return Tuple.Create(topicName, readBuffer);
