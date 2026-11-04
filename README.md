@@ -24,7 +24,7 @@ Connection fixes (`connection-robustness` branch):
 - Incoming messages get exact-size buffers again. `ArrayPool.Rent` returns bigger arrays than asked for, and sys command JSON was decoded from the whole array, trailing bytes included. The arrays were never returned to the pool anyway.
 - A 0-byte read is treated as the endpoint closing the connection. The summer change made the read loop spin at 100% CPU on `read += 0` in that case.
 - Any read error stops the reader and the connection thread reconnects right away (upstream kept retrying on the dead socket).
-- `Disconnect()` closes the socket right away. This unblocks a pending read, write or connect, which matters because Mono's `ReadAsync` ignores the cancellation token once the read is pending. Leaving play mode calls `OnApplicationQuit`, so the socket is closed before the domain reload. `OnDestroy` now disconnects too.
+- `Disconnect()` closes the socket right away. This unblocks a pending read, write or connect, which matters because Mono's `ReadAsync` ignores the cancellation token once the read is pending. Leaving play mode calls `OnApplicationQuit`, so the socket should be closed before the domain reload (not tested with a real domain reload yet). `OnDestroy` now disconnects too.
 - Calling `Connect()` while already connected stops the old connection thread first. It used to start a second one.
 - Writes time out after 10 s and connecting after 5 s. Both used to be able to block for minutes.
 - Keepalives are timed with a `Stopwatch` instead of `Time.realtimeSinceStartup`. That value only advances in `Update()`, so no keepalives went out while the editor was paused.
