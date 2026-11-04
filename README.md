@@ -1,8 +1,10 @@
 # ROS TCP Connector (McGill Robotics fork)
 
-This is a fork of Unity's [ROS-TCP-Connector](https://github.com/Unity-Technologies/ROS-TCP-Connector) 0.7.0. We use it in the McGill Robotics AUV simulator (Unity 6) to talk to our ROS 2 Humble stack through the matching endpoint fork, [kaidalisohaib/ROS-TCP-Endpoint](https://github.com/kaidalisohaib/ROS-TCP-Endpoint) (branch `main-ros2-optimized`).
+Fork of Unity's [ROS-TCP-Connector](https://github.com/Unity-Technologies/ROS-TCP-Connector) 0.7.0, used by the McGill Robotics AUV simulator (Unity 6). The ROS side is our [endpoint fork](https://github.com/kaidalisohaib/ROS-TCP-Endpoint) running on ROS 2 Jazzy.
 
-Upstream is no longer maintained. We forked it for two reasons. First, a few allocations and syscalls on the send path were worth cutting. Second, the connection used to get stuck when the sim or ROS was not shut down cleanly, or when the two were started and stopped in a different order. The wire protocol is unchanged. This fork still works with the upstream endpoint, and the upstream connector still works with our endpoint. You only get the keepalive-based dead connection detection when both sides are the fork.
+Upstream hasn't had a release since 2022. The main reason for this fork is that the bridge would get stuck if the sim or ROS wasn't shut down cleanly, or if they were started in a different order. There are also a few send-path optimizations from summer 2026.
+
+The wire protocol is the same as upstream, so you can mix this connector with the upstream endpoint or the other way around. Dead-connection detection through keepalives only works when both sides are the fork.
 
 ## What is different from upstream
 
@@ -20,14 +22,14 @@ The summer commit also rented incoming buffers from `ArrayPool`. That was a bug 
 Connection fixes (`connection-robustness` branch):
 
 - Incoming messages get exact-size buffers again. `ArrayPool.Rent` returns bigger arrays than asked for, and sys command JSON was decoded from the whole array, trailing bytes included. The arrays were never returned to the pool anyway.
-- A read of 0 bytes now means "the endpoint closed the connection". Before, the read loop spun at 100% CPU (`read += 0`) until a write happened to fail.
-- The reader stops on any read error, and the connection thread reconnects as soon as that happens. Upstream kept logging and retrying on the dead socket.
+- A 0-byte read is treated as the endpoint closing the connection. The summer change made the read loop spin at 100% CPU on `read += 0` in that case.
+- Any read error stops the reader and the connection thread reconnects right away (upstream kept retrying on the dead socket).
 - `Disconnect()` closes the socket right away. This unblocks a pending read, write or connect, which matters because Mono's `ReadAsync` ignores the cancellation token once the read is pending. Leaving play mode calls `OnApplicationQuit`, so the socket is closed before the domain reload. `OnDestroy` now disconnects too.
 - Calling `Connect()` while already connected stops the old connection thread first. It used to start a second one.
-- Writes time out after 10 s, and connecting times out after 5 s. Both could block forever or for minutes before.
+- Writes time out after 10 s and connecting after 5 s. Both used to be able to block for minutes.
 - Keepalives are timed with a `Stopwatch` instead of `Time.realtimeSinceStartup`. That value only advances in `Update()`, so no keepalives went out while the editor was paused.
 - If no handshake arrives within 10 s of connecting, Unity reconnects. If the endpoint is the fork, it sends keepalives, so 10 s of silence also triggers a reconnect.
-- On reconnect, publisher registrations are written straight to the new socket like the other registrations. Before, they were queued behind messages for that topic, which the endpoint then rejected.
+- Publisher registrations on reconnect go straight to the new socket, like the other registrations. Upstream queued them behind that topic's messages, so the endpoint rejected the first few messages.
 - The "connection failed" warning is logged once per outage, not every second.
 
 ## Installing
@@ -46,7 +48,7 @@ Or edit `Packages/manifest.json` directly:
 "com.unity.robotics.ros-tcp-connector": "https://github.com/kaidalisohaib/ROS-TCP-Connector.git?path=/com.unity.robotics.ros-tcp-connector#main-ros2-optimized"
 ```
 
-The part after `#` can be a branch, a tag or a full commit hash. Use `#connection-robustness` until that branch is merged into `main-ros2-optimized`. Unity writes the resolved commit to `Packages/packages-lock.json`, so commit that file to make sure everyone gets the same version. For a fully reproducible build, put a commit hash after `#`. To pick up new commits on a branch, delete the package's entry from `packages-lock.json`.
+The part after `#` can be a branch, a tag or a full commit hash. Unity writes the resolved commit to `Packages/packages-lock.json`, so commit that file to make sure everyone gets the same version. For a fully reproducible build, put a commit hash after `#`. To pick up new commits on a branch, delete the package's entry from `packages-lock.json`.
 
 Remember to set the protocol to ROS 2 under `Robotics > ROS Settings` (it adds the `ROS2` scripting define).
 
@@ -56,7 +58,7 @@ Remember to set the protocol to ROS 2 under `Robotics > ROS Settings` (it adds t
 - Messages queued while disconnected are thrown away on reconnect, same as upstream. Latched publishers re-send their last message.
 - Dead-endpoint detection by silence only works with the fork's endpoint. With the upstream endpoint, Unity notices a dead connection when the socket closes or a write times out.
 - The 10 s and 5 s timeouts are constants in `ROSConnection.cs` (`k_DeadConnectionTimeoutSeconds`, `k_ConnectTimeoutSeconds`), not inspector settings.
-- Only tested in ROS 2 mode, with Unity 6000.0 and the endpoint fork on Humble and Jazzy. ROS 1 mode compiles but was not tested.
+- Only tested in ROS 2 mode, with Unity 6000.0 and the endpoint fork on Jazzy and Humble. ROS 1 mode compiles but was not tested.
 
 ---
 
