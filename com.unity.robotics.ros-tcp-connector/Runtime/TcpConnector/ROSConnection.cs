@@ -95,8 +95,10 @@ namespace Unity.Robotics.ROSTCPConnector
         CancellationTokenSource m_ConnectionThreadCancellation;
         public bool HasConnectionThread => m_ConnectionThreadCancellation != null;
 
-        static bool m_HasConnectionError = false;
+        static bool m_HasConnectionError = true;
         public bool HasConnectionError => m_HasConnectionError;
+
+        public static bool IsConnected => _instance != null && _instance.HasConnectionThread && !m_HasConnectionError;
 
         // only the main thread can access Time.*, so make a copy here
         public static float s_RealTimeSinceStartup = 0.0f;
@@ -562,6 +564,7 @@ namespace Unity.Robotics.ROSTCPConnector
 
         public void Disconnect()
         {
+            m_HasConnectionError = true;
             // Cancelling also closes the TcpClient (see ConnectionThread), which unblocks any
             // pending read or write. So the socket is closed now, before a domain reload can
             // kill the thread and leak it, and the endpoint sees the disconnect immediately.

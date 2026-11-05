@@ -49,11 +49,18 @@ namespace Unity.Robotics.ROSTCPConnector
                     TryRecycleMessage(m_OutgoingMessages.First.Value);
                     m_OutgoingMessages.RemoveFirst();
                     
-                    m_DroppedMessageCount++;
-                    if (m_DroppedMessageCount % 30 == 1) // Log every 30 drops to avoid spam
+                    if (ROSConnection.IsConnected)
                     {
-                        UnityEngine.Debug.LogWarning($"[ROS-TCP-Connector] Dropped {m_DroppedMessageCount} messages on topic '{TopicName}'! " +
-                                                     $"The ROS 2 endpoint cannot keep up with the publish rate.");
+                        m_DroppedMessageCount++;
+                        if (m_DroppedMessageCount % 30 == 1) // Log every 30 drops to avoid spam
+                        {
+                            UnityEngine.Debug.LogWarning($"[ROS-TCP-Connector] Dropped {m_DroppedMessageCount} messages on topic '{TopicName}'! " +
+                                                         $"The ROS 2 endpoint cannot keep up with the publish rate.");
+                        }
+                    }
+                    else
+                    {
+                        m_DroppedMessageCount = 0;
                     }
                 }
 
