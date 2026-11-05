@@ -6,6 +6,29 @@ using UnityEngine;
 
 namespace Unity.Robotics.ROSTCPConnector.MessageGeneration
 {
+    public struct SerializationChunk
+    {
+        public byte[] Buffer;
+        public int Offset;
+        public int Length;
+
+        public SerializationChunk(byte[] buffer)
+        {
+            Buffer = buffer;
+            Offset = 0;
+            Length = buffer != null ? buffer.Length : 0;
+        }
+
+        public SerializationChunk(byte[] buffer, int offset, int length)
+        {
+            Buffer = buffer;
+            Offset = offset;
+            Length = length;
+        }
+
+        public static implicit operator SerializationChunk(byte[] buffer) => new SerializationChunk(buffer);
+    }
+
     public class MessageSerializer
     {
         // static data to insert into the serialization list, so that we don't have to alloc
@@ -27,7 +50,7 @@ namespace Unity.Robotics.ROSTCPConnector.MessageGeneration
         int m_AlignmentOffset;
         int m_LengthCorrection; // alignment ignores the ros2 header etc, so add this to get actual length
         public int Length => m_AlignmentOffset + m_LengthCorrection;
-        List<byte[]> m_ListOfSerializations = new List<byte[]>();
+        List<SerializationChunk> m_ListOfSerializations = new List<SerializationChunk>();
 
         public MessageSerializer()
         {
@@ -69,20 +92,21 @@ namespace Unity.Robotics.ROSTCPConnector.MessageGeneration
         {
             byte[] serializedMessage = new byte[Length];
             int writeIndex = 0;
-            foreach (byte[] statement in m_ListOfSerializations)
+            for (int i = 0; i < m_ListOfSerializations.Count; i++)
             {
-                if (statement == null)
+                var chunk = m_ListOfSerializations[i];
+                if (chunk.Buffer == null || chunk.Length == 0)
                     continue;
-                statement.CopyTo(serializedMessage, writeIndex);
-                writeIndex += statement.Length;
+                Buffer.BlockCopy(chunk.Buffer, chunk.Offset, serializedMessage, writeIndex, chunk.Length);
+                writeIndex += chunk.Length;
             }
             return serializedMessage;
         }
 
-        public List<byte[]> GetBytesSequence()
+        public List<SerializationChunk> GetBytesSequence()
         {
             // TODO: check what's faster - copying the list...
-            List<byte[]> result = new List<byte[]>(m_ListOfSerializations);
+            List<SerializationChunk> result = new List<SerializationChunk>(m_ListOfSerializations);
             // ...or giving away the old list and making a new one?
             //List<byte[]> result = m_ListOfSerializations;
             //m_ListOfSerializations = new List<byte[]>();
@@ -104,12 +128,13 @@ namespace Unity.Robotics.ROSTCPConnector.MessageGeneration
             }
 
             int writeIndex = 0;
-            foreach (byte[] statement in m_ListOfSerializations)
+            for (int i = 0; i < m_ListOfSerializations.Count; i++)
             {
-                if (statement == null)
+                var chunk = m_ListOfSerializations[i];
+                if (chunk.Buffer == null || chunk.Length == 0)
                     continue;
-                statement.CopyTo(m_SendBuffer, writeIndex);
-                writeIndex += statement.Length;
+                Buffer.BlockCopy(chunk.Buffer, chunk.Offset, m_SendBuffer, writeIndex, chunk.Length);
+                writeIndex += chunk.Length;
             }
             stream.Write(m_SendBuffer, 0, Length);
         }
@@ -236,6 +261,15 @@ namespace Unity.Robotics.ROSTCPConnector.MessageGeneration
 
             m_ListOfSerializations.Add(values);
             m_AlignmentOffset += values.Length;
+        }
+
+        public void Write(byte[] values, int offset, int count)
+        {
+            if (count == 0)
+                return;
+
+            m_ListOfSerializations.Add(new SerializationChunk(values, offset, count));
+            m_AlignmentOffset += count;
         }
 
         public void Write(sbyte[] values)

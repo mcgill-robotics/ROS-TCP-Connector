@@ -87,6 +87,11 @@ namespace Unity.Robotics.ROSTCPConnector
             {
                 return m_OutgoingMessageQueue.TryDequeue(out outgoingMessageSender);
             }
+
+            public void Clear()
+            {
+                while (m_OutgoingMessageQueue.TryDequeue(out _)) { }
+            }
         }
 
         OutgoingMessageQueue m_OutgoingMessageQueue = new OutgoingMessageQueue();
@@ -440,6 +445,10 @@ namespace Unity.Robotics.ROSTCPConnector
 
             public void AddSenderToQueue(OutgoingMessageSender sender)
             {
+                if (!ROSConnection.IsConnected)
+                {
+                    return;
+                }
                 m_Self.m_OutgoingMessageQueue.Enqueue(sender);
             }
         }
@@ -542,13 +551,21 @@ namespace Unity.Robotics.ROSTCPConnector
             }
 
             foreach (RosTopicState topicInfo in m_Topics.Values.ToArray())
+            {
                 topicInfo.OnConnectionEstablished(stream);
+                if (topicInfo.IsPublisher && topicInfo.MessageSender != null && topicInfo.MessageSender.HasPendingMessages)
+                {
+                    m_OutgoingMessageQueue.Enqueue(topicInfo.MessageSender);
+                }
+            }
 
             RefreshTopicsList();
         }
 
         void OnConnectionLostCallback()
         {
+            m_OutgoingMessageQueue?.Clear();
+
             RosTopicState[] topics;
             lock (m_Topics)
             {
@@ -565,6 +582,7 @@ namespace Unity.Robotics.ROSTCPConnector
         public void Disconnect()
         {
             m_HasConnectionError = true;
+            m_OutgoingMessageQueue?.Clear();
             // Cancelling also closes the TcpClient (see ConnectionThread), which unblocks any
             // pending read or write. So the socket is closed now, before a domain reload can
             // kill the thread and leak it, and the endpoint sees the disconnect immediately.

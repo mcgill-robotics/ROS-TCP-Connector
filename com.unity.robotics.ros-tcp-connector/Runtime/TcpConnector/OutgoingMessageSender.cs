@@ -26,18 +26,22 @@ namespace Unity.Robotics.ROSTCPConnector
      */
     public class SysCommandSender : OutgoingMessageSender
     {
-        List<byte[]> m_ListOfSerializations;
+        List<SerializationChunk> m_Chunks;
 
-        public SysCommandSender(List<byte[]> listOfSerializations)
+        public SysCommandSender(List<SerializationChunk> chunks)
         {
-            m_ListOfSerializations = listOfSerializations;
+            m_Chunks = chunks;
         }
 
         public override SendToState SendInternal(MessageSerializer m_MessageSerializer, Stream stream)
         {
-            foreach (byte[] statement in m_ListOfSerializations)
+            for (int i = 0; i < m_Chunks.Count; i++)
             {
-                stream.Write(statement, 0, statement.Length);
+                var chunk = m_Chunks[i];
+                if (chunk.Buffer != null && chunk.Length > 0)
+                {
+                    stream.Write(chunk.Buffer, chunk.Offset, chunk.Length);
+                }
             }
 
             return SendToState.Normal;
@@ -45,7 +49,7 @@ namespace Unity.Robotics.ROSTCPConnector
 
         public override void ClearAllQueuedData()
         {
-            m_ListOfSerializations.Clear();
+            m_Chunks.Clear();
         }
     }
 }

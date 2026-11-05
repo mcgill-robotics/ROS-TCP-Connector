@@ -27,6 +27,8 @@ namespace RosMessageTypes.Sensor
         //      jpeg, png
         public byte[] data;
         //  Compressed image buffer
+        [NonSerialized]
+        public int dataLength = -1;
 
         public CompressedImageMsg()
         {
@@ -49,14 +51,19 @@ namespace RosMessageTypes.Sensor
             this.header = Std.HeaderMsg.Deserialize(deserializer);
             deserializer.Read(out this.format);
             deserializer.Read(out this.data, sizeof(byte), deserializer.ReadLength());
+            this.dataLength = this.data != null ? this.data.Length : 0;
         }
 
         public override void SerializeTo(MessageSerializer serializer)
         {
             serializer.Write(this.header);
             serializer.Write(this.format);
-            serializer.WriteLength(this.data);
-            serializer.Write(this.data);
+            int len = dataLength >= 0 ? dataLength : (this.data != null ? this.data.Length : 0);
+            serializer.Write(len);
+            if (len > 0)
+            {
+                serializer.Write(this.data, 0, len);
+            }
         }
 
         public override string ToString()

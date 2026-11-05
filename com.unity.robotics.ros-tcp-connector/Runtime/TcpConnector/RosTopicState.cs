@@ -91,7 +91,10 @@ namespace Unity.Robotics.ROSTCPConnector
 
             Message message = Deserialize(data);
 
-            m_SubscriberCallbacks.ForEach(item => item(message));
+            for (int i = 0; i < m_SubscriberCallbacks.Count; i++)
+            {
+                m_SubscriberCallbacks[i](message);
+            }
         }
 
         void OnMessageSent(Message message)
@@ -102,7 +105,10 @@ namespace Unity.Robotics.ROSTCPConnector
                 ChangeRosMessageName(message.RosMessageName);
             }
 
-            m_SubscriberCallbacks.ForEach(item => item(message));
+            for (int i = 0; i < m_SubscriberCallbacks.Count; i++)
+            {
+                m_SubscriberCallbacks[i](message);
+            }
         }
 
         internal async void HandleUnityServiceRequest(byte[] data, int serviceId)
@@ -213,7 +219,10 @@ namespace Unity.Robotics.ROSTCPConnector
             m_LastMessageSentRealtime = ROSConnection.s_RealTimeSinceStartup;
             OnMessageSent(message);
             m_MessageSender.Queue(message);
-            m_ConnectionInternal.AddSenderToQueue(m_MessageSender);
+            if (ROSConnection.IsConnected)
+            {
+                m_ConnectionInternal.AddSenderToQueue(m_MessageSender);
+            }
         }
 
         void CreateMessageSender(int queueSize)
